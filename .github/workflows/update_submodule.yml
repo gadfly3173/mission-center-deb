@@ -1,0 +1,137 @@
+name: Update submodule and Release
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 每天 UTC 时间0点触发
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+jobs:
+  update-submodule:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    container:
+      image: ubuntu:20.04
+    steps:
+      - name: Setup Ubuntu 20.04 environment
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y ca-certificates curl git gnupg
+          # 安装 GitHub CLI
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          apt-get update
+          apt-get install -y gh
+
+      - name: Setup portable build environment
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          # 安装构建脚本所需的依赖
+          apt-get install -y build-essential curl cmake git gettext python3-pip \
+            python3-gi libudev-dev libdrm-dev libgbm-dev desktop-file-utils \
+            libdbus-1-dev pkg-config dpkg-dev ninja-build
+          # 创建符号链接
+          ln -sf /usr/bin/python3 /usr/local/bin/python
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # 获取完整提交历史和标签
+          submodules: recursive   # 递归克隆子模块
+
+      - name: Detect new submodule tag
+        id: detect
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          cd mission-center
+          git fetch --tags
+          LATEST_TAG=$(git tag | sort -V | tail -n1)
+          CURRENT_TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
+          echo "Latest tag: $LATEST_TAG"
+          echo "Current tag: $CURRENT_TAG"
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          cd "$GITHUB_WORKSPACE"
+          # 检查主仓库是否已有这个 tag
+          MAIN_REPO_HAS_TAG=$(git tag -l "$LATEST_TAG" | wc -l)
+          echo "Main repo has tag $LATEST_TAG: $MAIN_REPO_HAS_TAG"
+          if [ "$MAIN_REPO_HAS_TAG" -eq 0 ]; then
+            # 主仓库没有这个 tag
+            if [ "$LATEST_TAG" = "$CURRENT_TAG" ]; then
+              # submodule 已经在新 tag 上，给主仓库打上对应 tag
+              echo "Submodule is already on latest tag, creating tag for main repo"
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag "$LATEST_TAG"
+              git push origin "$LATEST_TAG"
+              echo "has_new_tag=true" >> $GITHUB_OUTPUT
+              echo "action=tag_only" >> $GITHUB_OUTPUT
+            else
+              # submodule 不在新 tag 上，需要更新 submodule
+              echo "Updating submodule to latest tag"
+              cd mission-center
+              git checkout "$LATEST_TAG"
+              cd "$GITHUB_WORKSPACE"
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add mission-center
+              git commit -m "chore: update submodule to $LATEST_TAG"
+              git tag "$LATEST_TAG"
+              git push
+              git push origin "$LATEST_TAG"
+              echo "has_new_tag=true" >> $GITHUB_OUTPUT
+              echo "action=update_and_tag" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "No new tag. Main repo already has tag $LATEST_TAG"
+            echo "has_new_tag=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Rust toolchain
+        if: steps.detect.outputs.has_new_tag == 'true'
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install build dependencies
+        if: steps.detect.outputs.has_new_tag == 'true'
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y \
+            build-essential cmake curl desktop-file-utils gettext git \
+            libdbus-1-dev libudev-dev libdrm-dev libgbm-dev meson pkg-config \
+            protobuf-compiler python3-gi python3-pip dpkg-dev ninja-build mold
+          # 创建符号链接
+          ln -sf /usr/bin/python3 /usr/local/bin/python
+          ln -sf /usr/bin/mold /usr/bin/ld
+          # 安装 Python 包
+          pip3 install meson ninja --break-system-packages
+          
+      - name: Build .deb package
+        if: steps.detect.outputs.has_new_tag == 'true'
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          chmod +x build-deb.sh
+          ./build-deb.sh "${{ steps.detect.outputs.latest_tag }}"
+
+      - name: Create GitHub Release
+        if: steps.detect.outputs.has_new_tag == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.detect.outputs.latest_tag }}
+        run: |
+          # 创建 release
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "自动发布：基于子模块标签 $TAG 的版本。构建信息：子模块更新动作：${{ steps.detect.outputs.action }}，构建时间：$(date -u '+%Y-%m-%d %H:%M:%S UTC')，基于 Mission Center $TAG" \
+            --draft=false \
+            --prerelease=false
+          
+          # 上传 .deb 文件
+          gh release upload "$TAG" "mission-center_${TAG}_amd64.deb"
