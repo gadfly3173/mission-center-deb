@@ -1,0 +1,3 @@
+[submodule "mission-center"]
+	path = mission-center
+	url = https://gitlab.com/mission-center-devs/mission-center.git
