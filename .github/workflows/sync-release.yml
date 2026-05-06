@@ -1,0 +1,171 @@
+name: Sync Mission Center release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Build a specific upstream tag instead of the latest release.
+        required: false
+        type: string
+  schedule:
+    - cron: '17 */4 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mission-center-release-sync
+  cancel-in-progress: false
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
+      release_url: ${{ steps.release.outputs.release_url }}
+      published_at: ${{ steps.release.outputs.published_at }}
+      description: ${{ steps.release.outputs.description }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Resolve upstream release
+        id: release
+        env:
+          INPUT_UPSTREAM_TAG: ${{ github.event.inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          bash ./scripts/get-upstream-release.sh >/tmp/upstream-release.json
+          jq . /tmp/upstream-release.json >/dev/null
+
+      - name: Decide whether a new build is needed
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG_NAME" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            echo "should_build=false" >>"$GITHUB_OUTPUT"
+            echo "GitHub release $TAG_NAME already exists; skipping build."
+          else
+            echo "should_build=true" >>"$GITHUB_OUTPUT"
+            echo "GitHub release $TAG_NAME does not exist yet; building package."
+          fi
+
+  build-deb:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build self-contained Debian package
+        env:
+          UPSTREAM_TAG: ${{ needs.check-upstream.outputs.tag_name }}
+          UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.version }}
+          UPSTREAM_COMMIT: ${{ needs.check-upstream.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          docker run --rm \
+            -e GITHUB_REPOSITORY \
+            -e UPSTREAM_TAG \
+            -e UPSTREAM_VERSION \
+            -e UPSTREAM_COMMIT \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            ubuntu:22.04 \
+            bash -lc '
+              set -euo pipefail
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                ca-certificates \
+                dpkg-dev \
+                file \
+                git \
+                patch
+              bash ./scripts/build-deb.sh "$UPSTREAM_TAG" "$UPSTREAM_VERSION" "$UPSTREAM_COMMIT"
+            '
+
+      - name: Upload Debian artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: mission-center-${{ needs.check-upstream.outputs.tag_name }}-deb
+          path: |
+            dist/*.deb
+            dist/*.sha256
+            dist/*.json
+          if-no-files-found: error
+
+  publish-release:
+    needs:
+      - check-upstream
+      - build-deb
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download Debian artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: mission-center-${{ needs.check-upstream.outputs.tag_name }}-deb
+          path: dist
+
+      - name: Write release notes
+        env:
+          TAG_NAME: ${{ needs.check-upstream.outputs.tag_name }}
+          COMMIT_SHA: ${{ needs.check-upstream.outputs.commit_sha }}
+          RELEASE_URL: ${{ needs.check-upstream.outputs.release_url }}
+          PUBLISHED_AT: ${{ needs.check-upstream.outputs.published_at }}
+          UPSTREAM_DESCRIPTION: ${{ needs.check-upstream.outputs.description }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Upstream source"
+            echo
+            echo "- Release: [$TAG_NAME]($RELEASE_URL)"
+            echo "- Commit: \`$COMMIT_SHA\`"
+            echo "- Published at: $PUBLISHED_AT"
+            echo "- Build environment: GitHub Actions \`ubuntu-22.04\` runner with an \`ubuntu:22.04\` build container."
+            echo
+            echo "## Notes"
+            echo
+            echo "This release contains a self-contained amd64 \`.deb\` package built from the corresponding upstream Mission Center release."
+            echo
+            echo "## Upstream release notes"
+            echo
+            if [[ -n "$UPSTREAM_DESCRIPTION" ]]; then
+              printf '%s\n' "$UPSTREAM_DESCRIPTION"
+            else
+              echo "No upstream release notes were returned by the GitLab API."
+            fi
+          } > release-notes.md
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.check-upstream.outputs.tag_name }}
+          name: Mission Center ${{ needs.check-upstream.outputs.tag_name }}
+          body_path: release-notes.md
+          files: |
+            dist/*.deb
+            dist/*.sha256
+            dist/*.json
+          fail_on_unmatched_files: true
+          generate_release_notes: false
