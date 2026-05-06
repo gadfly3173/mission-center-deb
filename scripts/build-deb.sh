@@ -25,7 +25,7 @@ app_dir="$pkgroot$app_root"
 deb_arch="$(dpkg --print-architecture)"
 multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
 deb_version="${upstream_version}-${package_release}"
-maintainer="${DEB_MAINTAINER:-方祝立 <noreply@users.noreply.github.com>}"
+maintainer="${DEB_MAINTAINER:-Gadfly <gadfly@gadfly.vip>}"
 homepage="${DEB_HOMEPAGE:-https://github.com/${GITHUB_REPOSITORY:-homolo/mission-center-deb}}"
 release_file_prefix="${package_name}_${deb_version}_${deb_arch}"
 
