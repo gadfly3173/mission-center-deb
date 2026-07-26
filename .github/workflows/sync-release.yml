@@ -96,7 +96,8 @@ jobs:
                 dpkg-dev \
                 file \
                 git \
-                patch
+                patch \
+                patchelf
               bash ./scripts/build-deb.sh "$UPSTREAM_TAG" "$UPSTREAM_VERSION" "$UPSTREAM_COMMIT"
             '
 

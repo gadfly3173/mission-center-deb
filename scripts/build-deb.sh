@@ -73,7 +73,19 @@ patch_upstream_build_script() {
   fi
 
   echo 'Patching curl downloads with retry logic for transient network failures'
-  sed -i 's/curl \(-L\|\)-LO /curl --retry 3 --retry-delay 5 \1-LO /g' "$script_path"
+  sed -i 's/curl \(-L\|\)-LO /curl --connect-timeout 30 --retry 5 --retry-delay 10 \1-LO /g' "$script_path"
+
+  # launchpad.net is unreachable from GitHub Actions runners (every connection
+  # attempt times out for the full 35-minute build). Fetch wayland and
+  # wayland-protocols from the gitlab.freedesktop.org source archive instead;
+  # it extracts to the same wayland-<ver>/ directory the script cds into.
+  if grep -qF -- 'launchpad.net' "$script_path"; then
+    echo 'Patching wayland/wayland-protocols downloads: launchpad.net -> gitlab.freedesktop.org (launchpad unreachable from GitHub Actions)'
+    sed -i 's#https://launchpad\.net/ubuntu/+archive/primary/+sourcefiles/wayland/[$]WAYLAND_VER_REL/wayland_[$]WAYLAND_VER[.]orig[.]tar[.]gz#https://gitlab.freedesktop.org/wayland/wayland/-/archive/$WAYLAND_VER/wayland-$WAYLAND_VER.tar.gz#g' "$script_path"
+    sed -i 's#wayland_[$]WAYLAND_VER[.]orig[.]tar[.]gz#wayland-$WAYLAND_VER.tar.gz#g' "$script_path"
+    sed -i 's#https://launchpad\.net/ubuntu/+archive/primary/+sourcefiles/wayland-protocols/[$]WAYLAND_PROTO_VER_REL/wayland-protocols_[$]WAYLAND_PROTO_VER[.]orig[.]tar[.]xz#https://gitlab.freedesktop.org/wayland/wayland-protocols/-/archive/$WAYLAND_PROTO_VER/wayland-protocols-$WAYLAND_PROTO_VER.tar.gz#g' "$script_path"
+    sed -i 's#wayland-protocols_[$]WAYLAND_PROTO_VER[.]orig[.]tar[.]xz#wayland-protocols-$WAYLAND_PROTO_VER.tar.gz#g' "$script_path"
+  fi
 
   # Ubuntu 22.04 does not ship the glslc package (it was added in 24.04+), and
   # the upstream apt list omits libvulkan-dev anyway, so GTK4's optional vulkan
@@ -89,6 +101,20 @@ patch_upstream_build_script() {
     echo 'Patching GTK4 build: disabling optional vulkan backend (glslc/libvulkan-dev unavailable on Ubuntu 22.04)'
     sed -i 's/-Dvulkan=enabled/-Dvulkan=disabled/g' "$script_path"
   fi
+
+  # pip on Ubuntu 22.04 is 22.0.2, which predates PEP 668 and does not understand
+  # --break-system-packages (added in pip 23.0). 22.04 has no externally-managed
+  # protection either, so a plain `pip3 install` works and writes to /usr/local.
+  if grep -qF -- '--break-system-packages' "$script_path"; then
+    echo 'Patching pip3 install: dropping --break-system-packages (unsupported by pip 22.x on Ubuntu 22.04)'
+    sed -i 's/ --break-system-packages//g' "$script_path"
+  fi
+
+  # NOTE: Do NOT add libappstream-dev here. The upstream build script builds
+  # AppStream 1.0.3 (SONAME 5) before libadwaita. If we install Ubuntu 22.04's
+  # libappstream-dev (SONAME 4), libadwaita will link against libappstream.so.4
+  # but the bundled libappstream.so.5 won't satisfy that dependency at runtime.
+  # Let libadwaita use the AppStream that the build script provides.
 }
 
 collect_runtime_packages() {
@@ -295,6 +321,14 @@ fi
 exit 0
 EOF
 chmod 0755 "$pkgroot/DEBIAN/postrm"
+
+# Set RPATH for the bundled binary so it finds bundled libraries first.
+# This ensures the binary works even when launched directly without the
+# wrapper script's LD_LIBRARY_PATH.
+if command -v patchelf >/dev/null 2>&1; then
+  echo "Setting RPATH for bundled binary"
+  patchelf --set-rpath "\$ORIGIN/../lib/$multiarch" "$app_dir/bin/missioncenter" 2>/dev/null || true
+fi
 
 runtime_depends="$(collect_runtime_packages "$app_dir")"
 installed_size="$(du -sk "$pkgroot" | cut -f1)"
