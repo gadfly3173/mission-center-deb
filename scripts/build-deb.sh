@@ -74,6 +74,21 @@ patch_upstream_build_script() {
 
   echo 'Patching curl downloads with retry logic for transient network failures'
   sed -i 's/curl \(-L\|\)-LO /curl --retry 3 --retry-delay 5 \1-LO /g' "$script_path"
+
+  # Ubuntu 22.04 does not ship the glslc package (it was added in 24.04+), and
+  # the upstream apt list omits libvulkan-dev anyway, so GTK4's optional vulkan
+  # backend cannot be built in this container. Mission Center only displays the
+  # GPU's vulkan_version string (read from hardware) and never uses the vulkan
+  # backend at runtime, so drop glslc from the apt list and disable the backend.
+  if grep -qF -- 'glslc' "$script_path"; then
+    echo 'Patching upstream apt list: removing glslc (unavailable on Ubuntu 22.04)'
+    sed -i -E 's/[[:space:]]+glslc([[:space:]])/\1/g' "$script_path"
+  fi
+
+  if grep -qF -- '-Dvulkan=enabled' "$script_path"; then
+    echo 'Patching GTK4 build: disabling optional vulkan backend (glslc/libvulkan-dev unavailable on Ubuntu 22.04)'
+    sed -i 's/-Dvulkan=enabled/-Dvulkan=disabled/g' "$script_path"
+  fi
 }
 
 collect_runtime_packages() {
