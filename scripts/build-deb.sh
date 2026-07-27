@@ -188,13 +188,23 @@ if [[ -d "$portable_dir/dependencies/usr" ]]; then
   cp -a "$portable_dir/dependencies/usr/." "$app_dir/"
 fi
 
-# Copy libappstream.so.4 from system if libadwaita links against it.
-# Ubuntu 22.04's libappstream provides SONAME 4 which libadwaita needs.
-if [[ -f "/usr/lib/$multiarch/libappstream.so.4" ]] && ! [[ -f "$app_dir/lib/$multiarch/libappstream.so.4" ]]; then
-  echo "Copying libappstream.so.4 from system to bundle"
-  mkdir -p "$app_dir/lib/$multiarch"
-  cp -Lv "/usr/lib/$multiarch/libappstream.so.4" "$app_dir/lib/$multiarch/"
-fi
+# Copy runtime libraries that libadwaita/gdk-pixbuf need but upstream doesn't bundle.
+# Ubuntu 22.04 provides these SONAME versions; newer distros have different versions.
+system_libs=(
+  "libappstream.so.4"
+  "libtiff.so.5"
+  "libjpeg.so.8"
+  "libjbig.so.0"
+  "libzstd.so.1"
+)
+for lib in "${system_libs[@]}"; do
+  lib_path="/usr/lib/$multiarch/$lib"
+  if [[ -f "$lib_path" ]] && ! [[ -f "$app_dir/lib/$multiarch/$lib" ]]; then
+    echo "Copying $lib from system to bundle"
+    mkdir -p "$app_dir/lib/$multiarch"
+    cp -Lv "$lib_path" "$app_dir/lib/$multiarch/"
+  fi
+done
 
 loaders_cache="$app_dir/lib/$multiarch/gdk-pixbuf-2.0/2.10.0/loaders.cache"
 if [[ -f "$loaders_cache" ]]; then
