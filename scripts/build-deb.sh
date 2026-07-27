@@ -117,13 +117,6 @@ patch_upstream_build_script() {
     echo 'Patching upstream apt list: adding appstream/libappstream-dev'
     sed -i 's/^\(apt install -y build-essential.*\)$/\1 appstream libappstream-dev/' "$script_path"
   fi
-
-  # Ensure libappstream.so.4 is copied to the output directory.
-  # Ubuntu 22.04's libappstream provides SONAME 4, which libadwaita links against.
-  if grep -qF -- 'libz.so.1}' "$script_path" && ! grep -qF -- 'libappstream.so.4' "$script_path"; then
-    echo 'Patching upstream library copy: adding libappstream.so.4'
-    sed -i 's/libz\.so\.1}/libz.so.1,libappstream.so.4}/g' "$script_path"
-  fi
 }
 
 collect_runtime_packages() {
@@ -193,6 +186,14 @@ mkdir -p \
 cp -a "$portable_dir/usr/." "$app_dir/"
 if [[ -d "$portable_dir/dependencies/usr" ]]; then
   cp -a "$portable_dir/dependencies/usr/." "$app_dir/"
+fi
+
+# Copy libappstream.so.4 from system if libadwaita links against it.
+# Ubuntu 22.04's libappstream provides SONAME 4 which libadwaita needs.
+if [[ -f "/usr/lib/$multiarch/libappstream.so.4" ]] && ! [[ -f "$app_dir/lib/$multiarch/libappstream.so.4" ]]; then
+  echo "Copying libappstream.so.4 from system to bundle"
+  mkdir -p "$app_dir/lib/$multiarch"
+  cp -Lv "/usr/lib/$multiarch/libappstream.so.4" "$app_dir/lib/$multiarch/"
 fi
 
 loaders_cache="$app_dir/lib/$multiarch/gdk-pixbuf-2.0/2.10.0/loaders.cache"
