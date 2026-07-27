@@ -110,11 +110,20 @@ patch_upstream_build_script() {
     sed -i 's/ --break-system-packages//g' "$script_path"
   fi
 
-  # NOTE: Do NOT add libappstream-dev here. The upstream build script builds
-  # AppStream 1.0.3 (SONAME 5) before libadwaita. If we install Ubuntu 22.04's
-  # libappstream-dev (SONAME 4), libadwaita will link against libappstream.so.4
-  # but the bundled libappstream.so.5 won't satisfy that dependency at runtime.
-  # Let libadwaita use the AppStream that the build script provides.
+  # libadwaita depends on appstream. Install the system package so
+  # `dependency('appstream')` resolves without the subproject.
+  # Ubuntu 22.04's libappstream-dev provides SONAME 4.
+  if grep -qF -- 'apt install -y build-essential' "$script_path" && ! grep -qF -- ' libappstream-dev' "$script_path"; then
+    echo 'Patching upstream apt list: adding appstream/libappstream-dev'
+    sed -i 's/^\(apt install -y build-essential.*\)$/\1 appstream libappstream-dev/' "$script_path"
+  fi
+
+  # Ensure libappstream.so.4 is copied to the output directory.
+  # Ubuntu 22.04's libappstream provides SONAME 4, which libadwaita links against.
+  if grep -qF -- 'libz.so.1}' "$script_path" && ! grep -qF -- 'libappstream.so.4' "$script_path"; then
+    echo 'Patching upstream library copy: adding libappstream.so.4'
+    sed -i 's/libz\.so\.1}/libz.so.1,libappstream.so.4}/g' "$script_path"
+  fi
 }
 
 collect_runtime_packages() {
