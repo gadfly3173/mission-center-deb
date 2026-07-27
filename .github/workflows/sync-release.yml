@@ -55,12 +55,21 @@ jobs:
           TAG_NAME: ${{ steps.release.outputs.tag_name }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG_NAME" --repo "$REPOSITORY" >/dev/null 2>&1; then
+
+          # Check if release exists and is not a draft
+          release_info="$(gh release view "$TAG_NAME" --repo "$REPOSITORY" --json isDraft,publishedAt 2>/dev/null || echo "")"
+
+          if [[ -z "$release_info" ]]; then
+            echo "should_build=true" >>"$GITHUB_OUTPUT"
+            echo "GitHub release $TAG_NAME does not exist; building package."
+          elif echo "$release_info" | jq -e '.isDraft == true' >/dev/null 2>&1; then
+            echo "should_build=true" >>"$GITHUB_OUTPUT"
+            echo "GitHub release $TAG_NAME exists but is a draft; rebuilding and updating."
+            # Delete the draft release so we can create a fresh one
+            gh release delete "$TAG_NAME" --repo "$REPOSITORY" --yes --cleanup-tag=false || true
+          else
             echo "should_build=false" >>"$GITHUB_OUTPUT"
             echo "GitHub release $TAG_NAME already exists; skipping build."
-          else
-            echo "should_build=true" >>"$GITHUB_OUTPUT"
-            echo "GitHub release $TAG_NAME does not exist yet; building package."
           fi
 
   build-deb:
